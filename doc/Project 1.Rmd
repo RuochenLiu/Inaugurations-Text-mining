@@ -1,0 +1,233 @@
+---
+title: "Project 1"
+author: "Ruochen Liu rl2841"
+date: "February 1, 2017"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+# What's this project for?
+
+Given these inaugurations, I want to focus on the language itself, trying to find some way to evaluate an inauguration mathematically. Lexical density is an important factor in NLP (Natural Language Processing) which is simply a measure of how informative and how formal a text is. More precisely, lexical words are simply nouns, adjectives, verbs, and adverbs. We can tell these words are informative easily, but to tell they are formal requires some papers (about nominalization) of Halliday. 
+
+Use lexical functions to get the lexical words and lexical rate of each sentence, and then we can find if there is a trend in results, like the change of density through the text, the density of whole test, and difference between inaugurations. Maybe we can learn from that when we try to write a speech.
+
+# 1. Load packages we need.
+
+```{r, warning=FALSE, include=FALSE}
+library("ggplot2")
+library("plyr")
+library("rvest")
+library("tibble")
+library("qdap")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RANN")
+library("tm")
+library("NLP") 
+library("openNLP")
+library("gridExtra")
+library("grid")
+library("lattice")
+source("../lib/plotstacked.R")
+source("../lib/speechFuncs.R")
+```
+
+# 2. Data harvest and data clean.
+
+```{r, message=FALSE, warning=FALSE}
+### Inauguaral speeches
+main.page <- read_html(x = "http://www.presidency.ucsb.edu/inaugurals.php")
+# Get link URLs
+# f.speechlinks is a function for extracting links from the list of speeches. 
+speech.url=f.speechlinks(main.page)
+#head(inaug)
+as.Date(speech.url[,1], format="%B %e, %Y")
+speech.url=speech.url[-nrow(speech.url),] # remove the last line, irrelevant due to error.
+speech.list=read.csv("../data/inauglist.csv", stringsAsFactors = FALSE)
+speech.list=cbind(speech.list, speech.url)
+
+# Loop over each row in speech.list
+speech.list$fulltext=NA
+for(i in seq(nrow(speech.list))) {
+  text <- read_html(speech.list$urls[i]) %>% # load the page
+    html_nodes(".displaytext") %>% # isloate the text
+    html_text() # get the text
+  speech.list$fulltext[i]=text
+  # Create the file name
+  filename <- paste0("../data/fulltext/", 
+                     speech.list$type[i],
+                     speech.list$File[i], "-", 
+                     speech.list$Term[i], ".txt")
+  sink(file = filename) %>% # open file to write 
+  cat(text)  # write the file
+  sink() # close the file
+}
+speech.list <- speech.list[,c(-2,-5,-7,-9)]
+colnames(speech.list)[1] <- "President"
+colnames(speech.list)[5] <- "Date"
+```
+
+# 3. Generate list of sentences.
+
+```{r, message=FALSE, warning=FALSE}
+sentence.list=NULL
+for(i in 1:nrow(speech.list)){
+  sentences=sent_detect(speech.list$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    word.count=word_count(sentences)
+    sentence.list=rbind(sentence.list, 
+                        cbind(speech.list[i,-ncol(speech.list)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+}
+sentence.list <-  sentence.list %>% filter(!is.na(word.count)) 
+head(sentence.list, 3)
+```
+
+# 4. Data Analysis to Get the lexical density of sentences and inaugurations. 
+
+May take 6 minutes or more.
+
+```{r}
+# Combine president name and term.
+nms.pre <- paste(speech.list$President, speech.list$Term, sep = "-Term") 
+```
+
+```{r, echo=TRUE}
+# Function for lexical density/content words of a sentence, using lexical classification score.
+lexical.rate <- function(s){
+  t <- vector("numeric", length(s))
+  for(i in 1:length(t)){
+    t[i] <-  lexical_classification(s[i])[[4]]$ave.content.rate/100
+  }
+  return(t)
+}
+lexical.num <- function(s){
+   t <- vector("numeric", length(s))
+  for(i in 1:length(t)){
+    t[i] <-  lexical_classification(s[i])[[4]]$n.content
+  }
+  return(t)
+}
+
+# Get the number and rate of content words for each sentences.
+sentence.list$content.rate <- lexical.rate(sentence.list$sentences) 
+sentence.list$content.num <- lexical.num(sentence.list$sentences)
+# Get the number of content words for each inauguration.
+content.sum <- with(sentence.list, tapply(content.num, list(President, Term), sum)) 
+content.sum <- as.data.frame(t(as.matrix(content.sum)))
+for(i in 1:nrow(speech.list)){
+  nm <- speech.list$President[i]
+  s <- speech.list$Term[i]
+  speech.list$content.num[i] <- content.sum[nm][s,1]
+}
+speech.list$content.rate <- speech.list$content.num/speech.list$Words
+```
+
+# 5. Visualization and analysis
+
+I only choose four famous presidents for presentation. Generating all the figures may take 5 minutes. 
+
+```{r, echo=TRUE}
+# Generate the figures.
+for(i in 1:nrow(speech.list)){
+  png(paste("../output/",speech.list$President[i],"-Term",speech.list$Term[i],".png", sep = ""), width = 500, height = 500 )
+  
+  nd <- sentence.list[sentence.list$President == speech.list$President[i] & sentence.list$Term == speech.list$Term[i],]
+  
+  g1 <- ggplot(nd, aes(x = sent.id, y = content.rate,color = President)) +geom_line()+facet_grid(President+Term~.)
+  
+  g2 <- ggplot(nd, aes(x = content.rate)) +
+  geom_histogram(aes(fill=factor(President),y=..density..), alpha=0.3,colour='black')+         stat_density(geom='line',position='identity',size=1.5, aes(colour=factor(President)))
+  
+  grid.arrange(g1, g2, ncol=1, nrow=2)
+  
+  dev.off()
+}
+```
+
+```{r, warning=FALSE}
+famous <- c("Barack Obama", "George W. Bush", "Abraham Lincoln", "Ronald Reagan")
+new.sent <- sentence.list[sentence.list$President %in% famous,]
+new.speech <- speech.list[speech.list$President %in% famous,]
+obama <- sentence.list[sentence.list$President == "Barack Obama",]
+bush <- sentence.list[sentence.list$President == "George W. Bush",]
+lincoln <- sentence.list[sentence.list$President == "Abraham Lincoln",]
+reagan <- sentence.list[sentence.list$President == "Ronald Reagan",]
+
+# Lines
+ggplot(new.sent[new.sent$Term == 1,], aes(x = sent.id, y = content.rate,color = President)) +geom_line()+facet_grid(President+Term~.)
+
+# Histgram
+ggplot(new.sent, aes(x = content.rate)) +
+  geom_histogram(aes(fill=factor(President),y=..density..), alpha=0.3,colour='black')+         stat_density(geom='line',position='identity',size=1.5, aes(colour=factor(President)))+
+ facet_wrap(~President+Term,ncol=2)
+
+# Boxplot - Term
+p1 <- ggplot(lincoln, aes(factor(Term), content.rate, fill=factor(Term))) + geom_boxplot() + xlab("Abraham Lincoln") + ylim(0.3, 0.5)
+p2 <- ggplot(reagan, aes(factor(Term), content.rate, fill=factor(Term))) + geom_boxplot() + xlab("Ronald Reagan") + ylim(0.3, 0.5)
+p3 <- ggplot(bush, aes(factor(Term), content.rate, fill=factor(Term))) + geom_boxplot() + xlab("George W. Bush") + ylim(0.3, 0.5)
+p4 <- ggplot(obama, aes(factor(Term), content.rate, fill=factor(Term))) + geom_boxplot() + xlab("Barack Obama") + ylim(0.3, 0.5)
+grid.arrange(p1,p2,p3,p4, ncol=2, nrow=2)
+```
+
+Let's take a look at the results. 
+
+The lexical density of an inauguration is well controlled around 44% (mean), which may be a factor for a good speech, and it is close to our daily communication.
+
+Most writers put the most informative sentences in the first one third of the speech, and the skill of switch between short and long  sentences is used perfectly, which can be told from the graphs.
+
+In the last part of speech, there is always a sharp decrement in lexical density followed by a sharp increment.
+
+Average densities of Democratic and Republican are almost the same, while others are lower. 
+
+47% 2nd term inaugurations have higher density than those in 1st term. However, in the last forty years, all presidents gave an inauguration with higher density when re-elected.
+
+...
+
+# 0. Linear regression
+
+From the work above, I started to think that the inaugurations are not written by the presidents, and what we get from textmining is all about their writer teams, who had hundreds of meetings to discuss what to include and how to express. 
+
+So what did presidents do with inaugurations?
+
+They delivered the speeches. So the health condition of a president is an influential factor of inaugurations. Because the length of an inauguration, content words density, sentence length and other factors can be influenced by president's energy. Every inauguration should be designed for that president, so I use the age of presidents as a factor of health condition and also response value, and factors of inaugurations as predictors to find if there is any relationship.
+
+```{r}
+age <- read.csv("../data/Age.csv", header = TRUE) # Use my own csv which contains ages of presidents when they gave their inaugurations.
+age <- ldply(age, data.frame)
+speech.list$Age <- age$X..i..
+data0 <- data.frame(age = speech.list$Age, words = speech.list$Words, cont.num = speech.list$content.num, cont.rate = speech.list$content.rate)
+rownames(data0) <- paste(speech.list$President, speech.list$Term, sep = "-Term")
+for(i in 1:nrow(speech.list)){
+  data0$sent.num[i] <- max(sentence.list$sent.id[sentence.list$President == speech.list$President[i] & sentence.list$Term == speech.list$Term[i]])
+}
+data0$party <- speech.list$Party
+data0$term <- speech.list$Term
+data0 <- data0[data0$sent.num > 50, ]
+
+lm0 <- lm(age~words+cont.num+cont.rate+as.factor(party)+I(words/term)+I(sent.num^2)+I(sent.num^3)+I(words/sent.num), data = data0)
+cat("lm0 <- lm(age~words+cont.num+cont.rate+as.factor(party)+I(words/term)+I(sent.num^2)+I(sent.num^3)+I(words/sent.num), data = data0)")
+summary(lm0)
+cat("RMSE is", sqrt(mean((residuals(lm0)^2))))
+```
+
+The RMSE is kind of okay because we can say someone is around 50 or 55, but the R square value is not good enough for a social data analysis.
+
+
